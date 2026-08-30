@@ -1,0 +1,6 @@
+# The probe fixture's policy. Hand-written, minimal, and NOT what `abloh init` derives:
+# the probe needs a merge base that either has a policy or does not, and nothing more.
+environment:
+  setup: .abloh/setup.sh
+  installDirectory: .
+  testCommand: node test/math.test.mjs
