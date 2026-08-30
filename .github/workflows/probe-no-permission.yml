@@ -1,0 +1,70 @@
+name: probe no-permission
+on:
+  pull_request:
+    paths:
+      - 'scenarios/no-permission/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+        with:
+          node-version: '22'
+      - run: npm test
+      # Abloh. It runs last, so it measures inside the tree the steps above just built,
+      # and rebuilds nothing of yours. It installs its own CLI - and its own Node, if
+      # this runner's is older than 20.6 - under RUNNER_TEMP, leaving your PATH alone.
+      # The if: runs it even when an earlier step of yours failed, so it says so rather
+      # than vanishing. It reports on this pull request and gates nothing until merge,
+      # and it files none of that itself - the abloh-attest job below does, because
+      # this job holds no permission to. Pinned to a commit; a tag can be moved.
+      - name: Abloh
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/abloh
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+          job-status: ${{ job.status }}
+          publish: attestation-job
+          # PROBE DEVIATION: the CLI is this working tree's, packed and committed to
+          # the base branch, which is where `admitCliOverride` requires the value to come from.
+          cli-tarball: ./.github/vendor/abloh-cli-0.1.4.tgz ./.github/vendor/abloh-attestation-0.1.0.tgz ./.github/vendor/abloh-core-0.1.3.tgz ./.github/vendor/abloh-engine-python-0.1.2.tgz ./.github/vendor/abloh-engine-stryker-0.1.3.tgz ./.github/vendor/abloh-engine-v2-0.1.0.tgz ./.github/vendor/abloh-mcp-0.1.0.tgz ./.github/vendor/abloh-reconcile-0.1.0.tgz ./.github/vendor/abloh-replay-0.1.0.tgz ./.github/vendor/abloh-sandbox-0.1.2.tgz ./.github/vendor/abloh-stryker-angular-runner-0.1.0.tgz ./.github/vendor/abloh-stryker-ava-runner-0.1.0.tgz ./.github/vendor/abloh-stryker-bun-runner-0.1.0.tgz ./.github/vendor/abloh-stryker-node-test-runner-0.1.0.tgz ./.github/vendor/abloh-triage-0.1.2.tgz
+  # Abloh's attestation job. It runs no code of yours, builds nothing and measures nothing:
+  # it takes the report the Abloh step above left on this run and files it.
+  #
+  # It is a separate job because GitHub grants id-token: write to a whole JOB and
+  # not to one step: putting it on the job above would hand the same identity to every
+  # step that runs there, Abloh's and everybody else's. Here it reaches Abloh's step
+  # and nothing else. It authorizes one thing, filing this report with Abloh, and
+  # carries no write access to your repository. Declaring the block below takes no
+  # grant away from anything, because this job is new and had none.
+  abloh-attest:
+    needs: test
+    # Runs even when the job above failed - a trial that stopped is the report you need.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      # PROBE DEVIATION: a customer's attestation job declares id-token: write and nothing
+      # else. This one checks the repository out to reach the local Action, so it needs the
+      # read the checkout uses. See deviation 2 in fixture.mjs.
+      contents: read
+      # THE SCENARIO. The one permission the setup pull request writes is deliberately absent
+      # here, so GitHub mints no identity and the job has to say WHICH of the three causes it
+      # is looking at rather than printing one sentence that covers all three.
+    steps:
+      # PROBE DEVIATION: a customer's attestation job runs abloh's step and nothing else,
+      # because GitHub fetches a pinned action for it. This one runs THIS tree's Action from
+      # disk, so the repository has to be here first. The split's own claim - that only
+      # abloh's steps run in the job holding the identity - is proved by
+      # apps/action/attestation-split.test.mjs and is NOT what this fixture demonstrates.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - name: Abloh attestation
+        uses: ./.github/actions/abloh/attest
+        with:
+          control-plane: ${{ vars.ABLOH_PROBE_CONTROL_PLANE }}
