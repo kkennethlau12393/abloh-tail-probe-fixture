@@ -1,0 +1,41 @@
+name: probe fallback
+on:
+  pull_request:
+    paths:
+      - 'scenarios/fallback/**'
+
+jobs:
+  abloh:
+    runs-on: ubuntu-latest
+    # PROBE DEVIATION: the fallback road files from this job, so it resolves its control
+    # plane through the boundary's own documented ABLOH_DEV_* overrides. EVERY endpoint is
+    # redirected, not only the handoff: this job holds an identity and would otherwise
+    # reach the real service. See fixture.mjs.
+    env:
+      ABLOH_DEV_HANDOFF_URL: ${{ vars.ABLOH_PROBE_CONTROL_PLANE }}/api/v1/runs
+      ABLOH_DEV_SETUP_TRIAL_URL: ${{ vars.ABLOH_PROBE_CONTROL_PLANE }}/api/v1/setup/trial
+      ABLOH_DEV_MODEL_GATEWAY_URL: ${{ vars.ABLOH_PROBE_CONTROL_PLANE }}/api/v1/model/chat/completions
+      ABLOH_DEV_LIVE_PROGRESS_URL: ${{ vars.ABLOH_PROBE_CONTROL_PLANE }}/api/v1/runs/live-progress
+      ABLOH_DEV_CHECK_ADMISSION_URL: ${{ vars.ABLOH_PROBE_CONTROL_PLANE }}/api/v1/runs/admission
+      ABLOH_DEV_COMMAND_CENTER_ORIGIN: ${{ vars.ABLOH_PROBE_CONTROL_PLANE }}
+    permissions:
+      contents: read
+      id-token: write # short-lived identity for the Abloh model gateway
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0 # Abloh diffs against the base ref
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22" # the probe fixture pins its runner Node
+      # Your build, whole, from the one file that holds it: .abloh/setup.sh.
+      # The step below runs it, inside Abloh, before anything is measured. Edit that file,
+      # not this workflow - and a step of it that fails is reported as a failed step of yours,
+      # by number, on your pull request, rather than as a shell error in this job's log.
+      - uses: ./.github/actions/abloh
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+          # PROBE DEVIATION: this tree's CLI, from the base branch. See fixture.mjs.
+          cli-tarball: ./.github/vendor/abloh-cli-0.1.4.tgz ./.github/vendor/abloh-attestation-0.1.0.tgz ./.github/vendor/abloh-core-0.1.3.tgz ./.github/vendor/abloh-engine-python-0.1.2.tgz ./.github/vendor/abloh-engine-stryker-0.1.3.tgz ./.github/vendor/abloh-engine-v2-0.1.0.tgz ./.github/vendor/abloh-mcp-0.1.0.tgz ./.github/vendor/abloh-reconcile-0.1.0.tgz ./.github/vendor/abloh-replay-0.1.0.tgz ./.github/vendor/abloh-sandbox-0.1.2.tgz ./.github/vendor/abloh-stryker-angular-runner-0.1.0.tgz ./.github/vendor/abloh-stryker-ava-runner-0.1.0.tgz ./.github/vendor/abloh-stryker-bun-runner-0.1.0.tgz ./.github/vendor/abloh-stryker-node-test-runner-0.1.0.tgz ./.github/vendor/abloh-triage-0.1.2.tgz

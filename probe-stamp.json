@@ -1,0 +1,27 @@
+{
+  "schema": "abloh-tail-probe-fixture/v1",
+  "revision": "6361a696d752bdd0495bf1d83a935b8dc2928df5",
+  "treeClean": true,
+  "action": {
+    "digest": "91a1c8af6ab0780d78c561f53223e7048c6bcf7ea9a20eca11afba452e540103",
+    "files": 33
+  },
+  "vendor": [
+    "abloh-attestation-0.1.0.tgz",
+    "abloh-cli-0.1.4.tgz",
+    "abloh-core-0.1.3.tgz",
+    "abloh-engine-python-0.1.2.tgz",
+    "abloh-engine-stryker-0.1.3.tgz",
+    "abloh-engine-v2-0.1.0.tgz",
+    "abloh-mcp-0.1.0.tgz",
+    "abloh-reconcile-0.1.0.tgz",
+    "abloh-replay-0.1.0.tgz",
+    "abloh-sandbox-0.1.2.tgz",
+    "abloh-stryker-angular-runner-0.1.0.tgz",
+    "abloh-stryker-ava-runner-0.1.0.tgz",
+    "abloh-stryker-bun-runner-0.1.0.tgz",
+    "abloh-stryker-node-test-runner-0.1.0.tgz",
+    "abloh-triage-0.1.2.tgz"
+  ],
+  "at": "2026-08-30T06:09:19.973Z"
+}

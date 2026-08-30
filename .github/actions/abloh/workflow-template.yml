@@ -1,0 +1,50 @@
+# The workflow Abloh publishes, and the one shape the product supports.
+#
+# Abloh runs LAST, after your own steps. Your workflow installs and builds exactly as it does for
+# your own test job, and Abloh measures inside what those steps left behind. That is the whole
+# mechanism: your CI already knows how to make your repository work, and Abloh borrows the result
+# instead of trying to rebuild it from a description.
+#
+# Two rules make this file safe, and both are lint-enforced by `workflow-shape.test.mjs`.
+#
+#   1. SCOPE EVERY SECRET TO THE STEP THAT NEEDS IT, never to the job. A GitHub Actions step
+#      inherits job-level `env`, so a secret written at job level is in every step's process
+#      environment including ours. Abloh strips a known list from every process it spawns and it
+#      never carries one across into the sealed container, but it cannot un-write your workflow.
+#      A step-scoped secret is never in our step's environment at all.
+#
+#   2. THE ABLOH STEP DECLARES NO SECRET OF ITS OWN. It needs none. GitHub mints a short-lived,
+#      audience-bound identity for the model gateway from `id-token: write`, and the gateway keeps
+#      the provider credential server side.
+#
+# Pin `abloh-action` to a full 40-character commit SHA. A tag can be moved.
+name: Abloh
+on: [pull_request]
+jobs:
+  abloh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Abloh needs the pull request's base commit in history to diff against.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # YOUR setup, unchanged from your own test job. Same runtime, same install, same build.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+        env:
+          # Step-scoped, never job-scoped. See rule 1 above.
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: pnpm build
+
+      # Abloh. It receives no secret of yours and reaches no network from inside the seal.
+      - uses: Vero-Technology/abloh-action@0000000000000000000000000000000000000000 # pin: full 40-char SHA
