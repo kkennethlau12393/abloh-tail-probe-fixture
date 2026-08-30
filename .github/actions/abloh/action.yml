@@ -1,0 +1,642 @@
+name: 'Abloh'
+description: >-
+  Run Abloh against the exact pull-request head after the repository's normal
+  checkout, runtime setup, dependency installation, and service setup. Produces
+  attest-results/v2 JSON, Markdown, and digest-bound raw evidence.
+inputs:
+  repo-path:
+    description: 'Path to the repository to attest, relative to the workspace.'
+    required: false
+    default: '.'
+  subdir:
+    description: >-
+      Package-path override. pull_request runs refuse this input and use
+      target.directory from the trusted merge-base abloh.yml; when that is absent, a
+      workspace-root run auto-selects the package when the PR's changed files all fall
+      inside exactly one workspace package (recorded as targetSelection: auto-diff).
+    required: false
+    default: ''
+  base:
+    description: >-
+      Optional cross-check on the pull request's own base. Abloh derives and verifies
+      github.event.pull_request.base.sha; a supplied value must resolve to that same commit,
+      and the run refuses when it does not. It cannot select a base: Abloh measures pull
+      requests, and a pull request states its base as a fact.
+    required: false
+    default: ''
+  tier:
+    description: >-
+      Deprecated, and still honoured by the engine that measures your runs today. The v1
+      engine reads it: it decides whether LLM triage runs and what leaves your CI. The v2
+      engine has no data-flow tier and ignores it. pull_request runs refuse this input and
+      use the trusted merge-base abloh.yml. It will be removed once v2 is the only engine.
+    required: false
+    default: ''
+  policy:
+    description: >-
+      Non-PR path to abloh.yml. pull_request runs refuse this input and resolve
+      <repo-path>/abloh.yml from the trusted merge base.
+    required: false
+    default: ''
+  environment-image:
+    description: >-
+      Non-PR immutable sandbox-proof image override (name@sha256:digest). pull_request runs
+      refuse this input and use environment.runtimeImage from the trusted merge-base policy.
+    required: false
+    default: ''
+  test-command:
+    description: >-
+      Non-PR exact JavaScript/TypeScript test-command override. pull_request runs refuse this
+      input and use environment.testCommand from the trusted merge-base policy.
+    required: false
+    default: ''
+  seed:
+    description: >-
+      Non-PR hex seed override for deterministic replay. pull_request runs refuse this input;
+      Abloh mints and records the run seed so a changed workflow cannot select its own mutants.
+    required: false
+    default: ''
+  record-network:
+    description: >-
+      Path, relative to the repository, to write network recordings to. THE RUN THAT USES THIS
+      REACHES THE NETWORK and is not a sealed measurement, so pull_request runs refuse this
+      input outright: it belongs in a workflow of your own that refreshes the file, never in
+      the check on a pull request. Commit what it writes and point environment.recordings at
+      it; every ordinary run then answers those calls from the file with no network at all.
+      Known credentials are stripped from what is stored, but the scrubber removes only what
+      it can name, so the file is yours to read before you commit it.
+    required: false
+    default: ''
+  record-loopback:
+    description: >-
+      Set to 'true' alongside record-network to include calls to localhost in the recording.
+      Off by default: a service Abloh provisions for your run is real and answers for itself.
+    required: false
+    default: ''
+  sweep:
+    description: >-
+      DIAGNOSTIC. Set to 'true' and this run measures NOTHING: instead of stopping at the first
+      wall it walks every stage to its end and writes one ordered wall ledger, abloh-sweep.json,
+      into the same runner-temporary directory as the results file would have gone. No
+      attest-results.json, no summary, no gate, no model call, and nothing is uploaded, so it
+      cannot make a pull request look measured. It is for finding out which stages of your setup
+      would have worked, in one run instead of one fix-and-rerun cycle per wall.
+
+      It is also the one input a run may keep after the boundary refuses, and only for a refusal
+      about IDENTITY - a checkout that is not the commit the pull request names, or a runtime older
+      than Abloh supports. The refusal is logged first and the sweep is labelled as attesting
+      nothing. A refusal about the seal itself always stops the run.
+    required: false
+    default: 'false'
+  publish:
+    description: >-
+      Where this run's results are filed from. Leave it unset and this step files them itself,
+      which needs `id-token: write` on the job it is running in.
+
+      Set it to `attestation-job` and this step files nothing: it leaves the report and the
+      handoff envelope on the run as an artifact, and a separate Abloh job - added by the same
+      setup pull request, running only Abloh's own step - downloads them and files them from
+      there. That is the setting `abloh init` writes when it appends this step to a job of
+      yours, and the reason is that GitHub grants `id-token: write` to a whole JOB: on your test
+      job it would reach every step that runs there, Abloh's and everybody else's, and any of
+      them could then mint Abloh's identity and file a report Abloh never measured.
+    required: false
+    default: ''
+  cli-tarball:
+    description: >-
+      Override the Abloh CLI this action installs. Leave it unset: the action installs the
+      published release, pinned to a version rather than to `latest`, into a private
+      runner-temporary prefix.
+
+      Set it only to run a CLI that is not on the registry — a release candidate, or a local
+      build. Takes one or more npm package specs (tarball paths or URLs), space-separated;
+      pass the dependencies alongside the CLI, because npm resolves them from the sibling
+      specs on the same install.
+
+      IT MUST COME FROM THE BASE BRANCH. This names the program that measures the pull request,
+      and that program is executed with Abloh's OIDC request credentials and its output is
+      trusted as this run's evidence, so a pull request that could choose it could author a
+      green result for code nobody measured. A run whose pull request changes any CI definition
+      (anything under .github/, or an action.yml/action.yaml anywhere) is REFUSED while this
+      input is set. Land the workflow change on the branch you are merging into, then set it
+      there. An unchanged workflow carries the base branch's value, which is the same authority
+      the trusted merge-base abloh.yml has.
+    required: false
+    default: ""
+  job-status:
+    # THE TWO VALUES THIS DESCRIPTION QUOTES ARE WRITTEN WITHOUT THEIR BRACES ON PURPOSE, and it is
+    # not a style choice: GitHub TEMPLATE-PARSES every string in an action manifest, descriptions
+    # included, so a `${{ ... }}` here is an expression it must evaluate. `job` is not a context an
+    # action may name, and the refusal is not scoped to the line — it is the WHOLE FILE:
+    #
+    #   ##[error]…/action.yml (Line: 127, Col: 18): Unrecognized named-value: 'job'
+    #   ##[error]Failed to load …/action.yml
+    #
+    # so not one step of this Action runs. Found by `apps/tail-probe` on 2026-08-30, on real GitHub,
+    # after five of its seven scenarios died at their first step; a diagnostic in the probe fixture
+    # proved the same failure for a pinned `owner/repo@ref` reference as for a local one, so this was
+    # how the published Action behaved for every customer. `action-manifest-expressions.test.mjs`
+    # holds the rule now, over both manifests, and is proved able to reject this exact shape.
+    description: >-
+      The status of the job this step is running inside, passed as the job.status context by the
+      step Abloh's setup pull request appends. It exists because a composite action CANNOT read
+      the status of its own job — only the caller's context has it — and because the appended
+      step carries an `if:` of `not cancelled()`, so it runs after an earlier step of yours failed
+      rather than being skipped by GitHub's implicit `success()`.
+
+      When it is 'failure' Abloh MEASURES NOTHING. The tree the steps above were building was
+      never finished, so anything measured in it would be a fact about a broken build reported
+      as a fact about the repository. Abloh reports that the job failed before it could measure
+      and stops, which is the honest answer and the one a maintainer can act on.
+
+      Leave it unset anywhere else. An unset value means 'nobody said', which is what every
+      standalone Abloh workflow means, and Abloh measures as it always has.
+    required: false
+    default: ''
+outputs:
+  results-path:
+    description: 'Runner-local attest-results.json path for a later trusted handoff job.'
+    value: ${{ steps.environment_preflight.outputs.output-dir }}/attest-results.json
+  summary-path:
+    description: 'Runner-local Markdown summary path.'
+    value: ${{ steps.environment_preflight.outputs.output-dir }}/attest-summary.md
+runs:
+  using: 'composite'
+  steps:
+    # =======================================================================================
+    # THE TRUSTED BOOTSTRAP BOUNDARY - read this before editing any `shell:` or `run:` below.
+    #
+    # A composite action is INLINED INTO THE CALLER'S JOB, so every step here inherits the
+    # workflow's and the job's `env:` maps. GitHub restricts what `$GITHUB_ENV` may set; it
+    # does not restrict `env:` at workflow, job or step scope, and that is the map these steps
+    # inherit. Two classes of variable in it make an interpreter run repository code BEFORE
+    # the program it was asked to run, which means before the first line of any script here,
+    # and therefore before any input check or credential scrub (assumption audit, 2026-08-29,
+    # rank 2 / AUTH-20):
+    #
+    #   1. STARTUP HOOKS. `BASH_ENV` is sourced by every non-interactive bash; `NODE_OPTIONS`
+    #      preloads `--require`/`--import` modules ahead of the entry point. Both reproduce in
+    #      one line, and `unset` inside a run step is always too late:
+    #
+    #        $ BASH_ENV=<(printf 'printf "X\n"\n') bash -c ':'                 -> X
+    #        $ NODE_OPTIONS='--import=data:text/javascript,console.log(1)' node -e ''  -> 1
+    #
+    #      Closed by the `shell:` line itself. `env -u ...` runs BEFORE bash, so bash starts
+    #      with no hook to read and the node it launches has none to preload. The full list and
+    #      the argument for why it is complete for bash and node live at
+    #      `AMBIENT_INTERPRETER_HOOKS` in action-boundary.mjs. Every step below repeats it,
+    #      because every step is a fresh bash process reading the same job environment.
+    #
+    #   2. IMPORTED SHELL FUNCTIONS (`BASH_FUNC_name%%`). Bash imports these at startup, and a
+    #      function outranks both an external command and a builtin when the name is CALLED -
+    #      so `node`, or `command`, could be somebody else's code. `env -u` cannot name them:
+    #      the names are unbounded. They are cleared instead by the first line of every `run:`,
+    #      which is early enough exactly because a function runs when it is called and not when
+    #      it is imported. The purge uses only builtins (`declare`, `read`, `unset`), so it
+    #      cannot itself be hijacked by the thing it is removing.
+    #
+    # `ambient-hook-boundary.test.mjs` holds both halves against this file, and runs the two
+    # reproductions above through the real `shell:` command rather than a copy of it.
+    # =======================================================================================
+    # ---------------------------------------------------------------------------------------
+    # THE RUNTIME ABLOH RUNS ON — ours to provide, not the customer's to have got right.
+    #
+    # FIRST, AHEAD OF THE CONTROL PLANE, because the step below now validates its values in
+    # this boundary rather than interpolating them in bash, and it should do that on Abloh's
+    # own runtime. Nothing in provisioning reads a control-plane value, so the order is free.
+    #
+    # The borrow road appends this step to the customer's OWN job, so Abloh inherits whatever
+    # runtime their workflow prepared. `alibaba/formily` runs `actions/setup-node@v1` with no
+    # version, which leaves Node 16.20.2, and the 2026-08-29 census lost that repository to a
+    # preflight refusal telling a maintainer to change how their build runs — for a tool they had
+    # not merged yet. Appending one step is not a mandate to edit somebody's toolchain.
+    #
+    # So this asks the question itself. A job that already prepared Node >=20.6 keeps it and nothing
+    # is installed; anything older and Abloh installs its own pinned Node into RUNNER_TEMP, from npm,
+    # never from a third-party action — the one-recipe ruling's own source (Kenneth, 2026-08-27).
+    #
+    # NOTHING IS WRITTEN TO $GITHUB_PATH OR $GITHUB_ENV. The customer's `node` stays the `node` every
+    # step of theirs resolves; each Abloh step below names this output instead. See the boundary's
+    # `provisionNodeRuntime` for why that is what keeps the measurement unaffected.
+    #
+    # AND THE VERSION IS ASKED IN BASH, BEFORE THE BOUNDARY IS HANDED TO `node` (corpus rehearsal,
+    # 2026-08-30, finding 10; `dai-shi/react-tracked`).
+    #
+    # `provisionNodeRuntime` is the thing that answers for an inadequate runtime, and it lives INSIDE
+    # `action-boundary.mjs`. That file is an ES module with top-level `await`, so a `node` old enough
+    # to need provisioning most is a `node` that cannot PARSE the file that would provision it.
+    # `react-tracked` prepares Node 12.22.12 in its own CI, and the whole of Abloh's first step was:
+    #
+    #     file:///…/action-boundary.mjs:266
+    #       const upload = required(environment.UPLOAD ?? "false", "upload");
+    #                                                   ^
+    #     SyntaxError: Unexpected token '?'
+    #
+    # A raw V8 stack trace naming an internal module path, with no owner, no cause and no remedy —
+    # which is the one shape every refusal in this product exists to replace. The guard below is in
+    # bash precisely because bash is what runs before any parse.
+    #
+    # SIXTEEN, AND THE COMPARISON IS ON THE MAJOR. Top-level `await` in an ES module is unflagged
+    # from 14.8, and a major-only test in bash cannot tell 14.8 from 14.0 — so the floor is the first
+    # WHOLE major that is above it. `action-boundary-parse-floor.test.mjs` pins this number against
+    # what the file actually needs, so a syntax feature added tomorrow moves the floor here.
+    #
+    # IT IS A REFUSAL AND NOT AN INSTALL, and that is the honest limit rather than a preference.
+    # Abloh installs its own Node for every runtime from 16 upward and asks the maintainer for
+    # nothing; below 16 the installer is unreachable, so the only thing left is to say so in Abloh's
+    # own words and name the edit. Read `docs/decisions/` before turning this into a bootstrap.
+    - name: Provision the Node runtime Abloh runs on
+      id: abloh_runtime
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        command -v node >/dev/null 2>&1 || { echo "set up a Node runtime before Abloh: Abloh installs its own with npm, and a runner with no node has no npm either" >&2; exit 2; }
+        abloh_node_version="$(node --version 2>/dev/null || true)"
+        abloh_node_major="${abloh_node_version#v}"
+        abloh_node_major="${abloh_node_major%%.*}"
+        case "$abloh_node_major" in
+          ''|*[!0-9]*)
+            echo "Abloh Action boundary: \`node --version\` answered \"${abloh_node_version}\", which Abloh cannot read as a version. Abloh needs to know the runtime it was handed before it can decide what to run on. This is a failure in abloh if that node is an ordinary one." >&2
+            exit 2
+            ;;
+        esac
+        if [ "$abloh_node_major" -lt 16 ]; then
+          echo "Abloh Action boundary: this job prepared Node ${abloh_node_version#v}, and Abloh's own code needs Node 16 or newer just to be read. Abloh normally installs its own runtime and leaves yours alone, but the step that does that is written in the file this node cannot parse, so it cannot run here. Add \`actions/setup-node\` with \`node-version: 20\` or newer to this job before Abloh's step, or run Abloh in a job of its own; your other steps keep the Node they have." >&2
+          exit 2
+        fi
+        node "$GITHUB_ACTION_PATH/action-boundary.mjs" provision-runtime
+    # ---------------------------------------------------------------------------------------
+    # WHERE THIS RUN REPORTS TO — ours to know, not the customer's to write.
+    #
+    # These four were inputs, so every workflow we handed out carried two of our URLs and two
+    # opaque strings, and the customer had to keep them right. Nobody can: they are not
+    # discoverable, they are identical for every customer, and one of them was WRONG in the
+    # file the product itself handed out — `handoff-audience` read `https://api.abloh.dev`
+    # while the control plane compares against `abloh-evidence-handoff` and rejects anything
+    # else, so every upload from a copy-pasted workflow would have been refused.
+    #
+    # They are constants of the deployment now. A customer's workflow names none of them, and
+    # an endpoint moves by releasing this Action rather than by asking everybody to edit a file.
+    #
+    # The ABLOH_DEV_* overrides are not documented inputs and no customer sets them. They exist
+    # so our own dev environment, whose control plane is a tunnel rather than api.abloh.dev,
+    # can run this same Action from a branch without a second copy of it.
+    #
+    # THE VALUES ARE VALIDATED IN THE BOUNDARY RATHER THAN INTERPOLATED IN BASH (assumption
+    # audit, 2026-08-29, rank 11 / FS-03). This was eleven `echo "NAME=${OVERRIDE:-default}"`
+    # lines redirected into $GITHUB_ENV, and an override is ambient: any earlier step of the
+    # customer's job can set one. A value carrying a newline therefore wrote TWO environment
+    # records, the second of them a variable nobody declared, into the map every later step of
+    # the job inherits, and the URL checks further down this file run long after that. Each
+    # value is now parsed as credential-free HTTPS or as a bounded control-free audience before
+    # a byte is written, through the same no-follow append `$GITHUB_OUTPUT` uses. See
+    # `resolveControlPlane` and `appendEnvironmentFile`.
+    # ---------------------------------------------------------------------------------------
+    - name: Resolve the control plane this run reports to
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        [ -x "$ABLOH_NODE" ] || { echo "Abloh's own Node runtime was not provisioned" >&2; exit 2; }
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" resolve-control-plane
+    - name: Verify caller-prepared environment
+      id: environment_preflight
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+        REPO_PATH: ${{ inputs.repo-path }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # The commit GitHub STARTED this run on, which on a pull_request event is its own test-merge
+        # commit — and is what `actions/checkout` with no `ref:` puts on disk. The boundary needs it
+        # to tell "this run's merge ref" from "somebody checked out something else"; the two shas
+        # above are what the merge must be OF. Named `..._VALUE` because `GITHUB_SHA` is already in
+        # every step's environment and a step cannot rebind it.
+        GITHUB_SHA_VALUE: ${{ github.sha }}
+        DECLARED_BASE: ${{ inputs.base }}
+        TIER: ${{ inputs.tier }}
+        SUBDIR: ${{ inputs.subdir }}
+        POLICY: ${{ inputs.policy }}
+        ENVIRONMENT_IMAGE: ${{ inputs.environment-image }}
+        TEST_COMMAND: ${{ inputs.test-command }}
+        SEED: ${{ inputs.seed }}
+        RECORD_NETWORK: ${{ inputs.record-network }}
+        RECORD_LOOPBACK: ${{ inputs.record-loopback }}
+        # Read HERE as well as by the run step, because this is where the identity-class ruling is
+        # applied: a sweep is the one thing that may continue past a refusal about what the checkout
+        # is, and the boundary can only know that if it knows a sweep was asked for.
+        SWEEP: ${{ inputs.sweep }}
+        # READ HERE, WHERE THE PULL REQUEST'S OWN DIFF IS ALREADY IN HAND. `cli-tarball` names the
+        # program that measures this pull request and receives Abloh's identity, so the boundary
+        # decides whether it came from the base branch and echoes back the value it admitted. The
+        # install step below reads that OUTPUT rather than this input. See `admitCliOverride`.
+        CLI_TARBALL: ${{ inputs.cli-tarball }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        # MODEL_GATEWAY_URL, MODEL_GATEWAY_AUDIENCE, HANDOFF_URL and HANDOFF_AUDIENCE are not
+        # listed here any more. The step above wrote them to the job environment, which every
+        # step below inherits — naming them again would be four more places to keep in step.
+        # The preflight still reads them, so a handoff that cannot work fails before the suite
+        # runs rather than after it.
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        # The runtime the step above provisioned. It cannot be empty unless that step was skipped,
+        # and a bare `node` here would silently put the run back on whatever the customer prepared.
+        [ -x "$ABLOH_NODE" ] || { echo "Abloh's own Node runtime was not provisioned" >&2; exit 2; }
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" preflight
+    - name: Install Abloh CLI
+      id: cli_install
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+        # THE PREFLIGHT'S OUTPUT AND NOT `inputs.cli-tarball`: this step installs and then EXECUTES
+        # what it is named, with Abloh's OIDC request credentials in that process's environment, so
+        # the string it acts on has to be one the boundary admitted.
+        CLI_TARBALL: ${{ steps.environment_preflight.outputs.cli-tarball }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" install-cli
+    - name: Prepare coverage provider cache
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        REPOSITORY_ROOT: ${{ steps.environment_preflight.outputs.repository-root }}
+        SUBDIR: ${{ inputs.subdir }}
+        ABLOH_CLI_PATH: ${{ steps.cli_install.outputs.path }}
+        ABLOH_CLI_PREFIX: ${{ steps.cli_install.outputs.prefix }}
+        ABLOH_COVERAGE_PROVIDER_CACHE_DIR: ${{ steps.environment_preflight.outputs.coverage-cache-dir }}
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" prepare
+    - name: Restore exact-commit baseline history
+      id: baseline_history_restore
+      uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ steps.environment_preflight.outputs.baseline-dir }}
+        key: abloh-baseline-v1-${{ runner.os }}-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          abloh-baseline-v1-${{ runner.os }}-${{ github.repository_id }}-
+    # The v2 engine's per-repository state: the carry-forward store, the predictor, pool 2's pinned
+    # bugs and the line map. Without this pair nothing survives a run, so every Action run starts
+    # cold and a second push on the same pull request re-asks every verdict it already has.
+    #
+    # The `restore-keys` prefix is repository-wide rather than pull-request-wide, and that is what
+    # makes the feature work: a rerun restores its own branch's previous run, and a pull request's
+    # FIRST run restores the base branch's records, which are valid for every file it did not touch.
+    # GitHub scopes cache reads to the branch and its base, so one pull request can never read
+    # another's - the isolation this needs, for free. A prefix match is not an equality check, so the
+    # store carries the repository digest it was written under and refuses a file from elsewhere.
+    - name: Restore engine-v2 per-repository state
+      id: v2_store_restore
+      uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ steps.environment_preflight.outputs.v2-store-dir }}
+        key: abloh-v2-store-v1-${{ runner.os }}-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          abloh-v2-store-v1-${{ runner.os }}-${{ github.repository_id }}-
+    # THE OTHER HALF OF THE SAME FEATURE. Carry-forward carries generation proposals, restored by the
+    # pair above, and triage VERDICTS, which live in the CLI's `--cache-dir` and were restored by
+    # nothing at all: the default is `~/.abloh/triage-cache`, and a hosted runner's home directory is
+    # gone when the job ends. So the expensive half of the saving was re-earned and discarded every
+    # push. Measured 2026-08-23: a shared triage cache carried 13 of 15 verdicts and took one run
+    # from $1.59 to $0.98, which is 10 of the 38 points of rerun saving the engine already earns.
+    #
+    # Restored on exactly the argument that covers the v2 store above and no wider: this is DATA, not
+    # executable code, and a carried verdict may only ever keep a gap open - `likely-equivalent` is
+    # re-asked live every run by the direction rule. The prefix and per-run key match the store's for
+    # the same reasons, and GitHub's branch scoping gives the same isolation for free.
+    - name: Restore triage verdict cache
+      id: triage_cache_restore
+      uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ steps.environment_preflight.outputs.triage-cache-dir }}
+        key: abloh-triage-cache-v1-${{ runner.os }}-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          abloh-triage-cache-v1-${{ runner.os }}-${{ github.repository_id }}-
+    - name: Run Abloh
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        REPOSITORY_ROOT: ${{ steps.environment_preflight.outputs.repository-root }}
+        SUBDIR: ${{ inputs.subdir }}
+        BASE: ${{ steps.environment_preflight.outputs.base }}
+        HEAD_SHA: ${{ steps.environment_preflight.outputs.head }}
+        TIER: ${{ inputs.tier }}
+        POLICY: ${{ inputs.policy }}
+        ENVIRONMENT_IMAGE: ${{ inputs.environment-image }}
+        TEST_COMMAND: ${{ inputs.test-command }}
+        SEED: ${{ inputs.seed }}
+        RECORD_NETWORK: ${{ inputs.record-network }}
+        RECORD_LOOPBACK: ${{ inputs.record-loopback }}
+        SWEEP: ${{ inputs.sweep }}
+        # WHETHER THIS PULL REQUEST CAME FROM A FORK, which only the caller's context knows and which
+        # decides WHICH sentence a run without an identity prints. GitHub mints no OIDC identity for
+        # a fork run whatever any job declares, so telling that maintainer to add a permission is an
+        # edit that cannot work - the one shape Kenneth's 2026-08-30 ruling bans.
+        ABLOH_PR_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        ABLOH_CLI_PATH: ${{ steps.cli_install.outputs.path }}
+        ABLOH_CLI_PREFIX: ${{ steps.cli_install.outputs.prefix }}
+        ABLOH_OUTPUT_DIR: ${{ steps.environment_preflight.outputs.output-dir }}
+        ABLOH_BASELINE_HISTORY_DIR: ${{ steps.environment_preflight.outputs.baseline-dir }}
+        ABLOH_COVERAGE_PROVIDER_CACHE_DIR: ${{ steps.environment_preflight.outputs.coverage-cache-dir }}
+        ABLOH_V2_STORE_DIR: ${{ steps.environment_preflight.outputs.v2-store-dir }}
+        ABLOH_TRIAGE_CACHE_DIR: ${{ steps.environment_preflight.outputs.triage-cache-dir }}
+        # THE STATUS OF THE JOB THIS STEP IS INSIDE, which only the caller can state. The appended
+        # step carries `if: ${{ !cancelled() }}`, so it now runs after one of their steps failed
+        # instead of being skipped by GitHub's implicit `success()`; this is what lets the trial say
+        # that happened rather than measuring a tree their own steps never finished building.
+        ABLOH_CALLER_JOB_STATUS: ${{ inputs.job-status }}
+        # MODEL_GATEWAY_URL and MODEL_GATEWAY_AUDIENCE arrive from the job environment.
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" run
+    # THE SETUP TRIAL'S REPORT, ON THE ONE RUN THAT PRODUCES ONE.
+    #
+    # A setup pull request refuses every input of this Action, so it asks for nothing: the CLI
+    # detects the setup-PR context from the merge base and writes `abloh-setup-trial.json`, and
+    # this step files it. Every ordinary run writes no such file and this step does nothing.
+    #
+    # `always()` RATHER THAN `success()`, AND RATHER THAN `!cancelled()`. A trial that walled exits 2
+    # and turns the setup check red, which is correct - and its report is exactly the one a
+    # maintainer needs, because it names the stage and the edit. Filing only successful trials would
+    # withhold the useful half.
+    #
+    # AND WHY IT WENT FURTHER THAN `!cancelled()` on 2026-08-29. This is the REPORTING half of the
+    # transaction, and by the time it runs the report is already written to disk: filing it is one
+    # HTTP call over work the customer has already paid for in CI minutes. `!cancelled()` threw that
+    # away on a cancelled run, leaving the setup pull request saying the trial was still running for
+    # ever. Nothing here measures anything, so there is no work for a cancellation to save.
+    #
+    # NOT ON THE BORROW ROAD (Kenneth's identity-split ruling, 2026-08-29). When `publish` names the
+    # attestation job this step is skipped and the two below take its place: this job holds no
+    # identity there, on purpose, because it is full of somebody else's steps.
+    - name: File the setup report
+      if: >-
+        ${{ always()
+            && inputs.publish != 'attestation-job'
+            && steps.environment_preflight.outputs.output-dir != '' }}
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+        ABLOH_OUTPUT_DIR: ${{ steps.environment_preflight.outputs.output-dir }}
+        ABLOH_PR_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        # SETUP_TRIAL_URL and SETUP_TRIAL_AUDIENCE arrive from the job environment.
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" report-setup-trial
+    - name: Validate completed measurement artifact
+      id: artifact_state
+      if: >-
+        ${{ !cancelled()
+            && steps.environment_preflight.outputs.output-dir != '' }}
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+        ABLOH_OUTPUT_DIR: ${{ steps.environment_preflight.outputs.output-dir }}
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        results="$(
+          ABLOH_ARTIFACT_NAME=attest-results.json \
+            "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" validate-artifact
+        )"
+        if [ -n "$results" ]; then
+          echo "complete=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+          # AND IT SAYS WHY, AT THE STEP THAT NOTICED (census wave 3, `vitejs/vite`).
+          #
+          # `complete=false` used to be the last word: every step below skipped, the upload reported
+          # "No files were found", and the reason sat four steps up on stderr where nothing reading
+          # this job through the API could reach it. The CLI now files the refusal beside where the
+          # artifact would have gone and this reads it back, so a maintainer sees the cause at the
+          # decision, not by scrolling. It cannot fail the step - it is a note about a failure that
+          # has already happened.
+          "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" explain-missing-artifact
+        fi
+    - name: Upload measured evidence
+      # Whenever a completed artifact exists. It used to also require a non-empty handoff-url,
+      # which was the caller opting in; there is no such input now and the address is always
+      # known, so the only question left is whether there is anything to send. `id-token: write`
+      # must be granted on the calling job for the identity below to be mintable - which is why
+      # this step is skipped when `publish` names the attestation job, where that grant lives.
+      if: >-
+        ${{ !cancelled()
+            && inputs.publish != 'attestation-job'
+            && steps.artifact_state.outputs.complete == 'true' }}
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+        ABLOH_OUTPUT_DIR: ${{ steps.environment_preflight.outputs.output-dir }}
+        # HANDOFF_URL and HANDOFF_AUDIENCE arrive from the job environment.
+        ABLOH_TRIGGER_SHA: ${{ github.sha }}
+        ABLOH_HEAD_SHA: ${{ steps.environment_preflight.outputs.head }}
+        ABLOH_PULL_REQUEST: ${{ github.event.pull_request.number }}
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" upload
+
+    # ---------------------------------------------------------------------------------------
+    # THE OTHER ROAD OUT: leave the result on the run, and let a job that holds an identity file it.
+    #
+    # These two steps are what `publish: attestation-job` selects instead of the two above. The job
+    # this step is running in is the customer's own test job and declares no `id-token: write`, so
+    # nothing in it - Abloh's step included - can reach Abloh's control plane. That is the property
+    # being bought: every step that ran before Abloh's is under the same rule.
+    #
+    # WHAT GOES UP IS WHAT WOULD HAVE GONE OVER THE WIRE, and not the output directory. The staging
+    # step writes at most two documents, both already destined to leave this runner; the raw report,
+    # which embeds the customer's own source, stays here.
+    # ---------------------------------------------------------------------------------------
+    # `always()`, ON THE SAME REASONING AS `File the setup report` ABOVE AND FOR THE SAME HALF OF THE
+    # TRANSACTION. By the time this runs the report is on disk; staging it is a file copy over work
+    # the customer has already paid for, and there is no measurement for a cancellation to save.
+    #
+    # THE JOB IT HANDS TO IS `!cancelled()` AND NOT `always()`, and the difference is the cost rather
+    # than a second opinion. This is a step in a job that is already running; that is a whole job,
+    # and scheduling a fresh runner after somebody pressed stop spends CI minutes on a report nobody
+    # is waiting for. The rule is the same - never lose a report to save nothing - and it lands
+    # differently because the two are not the same expense.
+    - name: Stage the result for the Abloh attestation job
+      id: abloh_attestation_stage
+      if: >-
+        ${{ always()
+            && inputs.publish == 'attestation-job'
+            && steps.environment_preflight.outputs.output-dir != '' }}
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_NODE: ${{ steps.abloh_runtime.outputs.node-path }}
+        ABLOH_OUTPUT_DIR: ${{ steps.environment_preflight.outputs.output-dir }}
+        ABLOH_TRIGGER_SHA: ${{ github.sha }}
+        ABLOH_HEAD_SHA: ${{ steps.environment_preflight.outputs.head }}
+        ABLOH_PULL_REQUEST: ${{ github.event.pull_request.number }}
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/action-boundary.mjs" stage-for-attestation
+    # `overwrite` IS LEFT AT ITS DEFAULT OF FALSE, and that is a decision rather than an omission. A
+    # step of somebody else's that uploaded an artifact under this name FIRST would take the name and
+    # this upload would fail loudly, which is what a maintainer should see; `overwrite: true` would
+    # let whichever ran last win silently.
+    #
+    # THE NAME IS FIXED, AND A MATRIX JOB IS THE ONE SHAPE THAT MAKES THAT VISIBLE: every leg would
+    # upload under it and the second would fail on the taken name. That is not repaired here, because
+    # a matrix job should not have received this step at all - `decideSetupJob` already calls it
+    # `needs-your-edit`, and the fix is the one that stops placing into an unresolved matrix rather
+    # than a name that makes several legs race the same setup row quietly. Whoever lands that fix
+    # owns this line with it.
+    - name: Hand it to the Abloh attestation job
+      if: >-
+        ${{ always()
+            && inputs.publish == 'attestation-job'
+            && steps.abloh_attestation_stage.outputs.staged == 'true' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: abloh-setup-trial
+        path: ${{ steps.abloh_attestation_stage.outputs.path }}
+        if-no-files-found: ignore
+        retention-days: 1
+
+    - name: Save exact-commit baseline history
+      if: ${{ always() && steps.artifact_state.outputs.complete == 'true' }}
+      uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ steps.environment_preflight.outputs.baseline-dir }}
+        key: abloh-baseline-v1-${{ runner.os }}-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    # Saved on the SAME condition as the baseline history: a run whose artifact never completed did
+    # not finish measuring, so what it managed to write is a partial view of a push nobody will read.
+    # The key is unique per run so every run writes its own entry, and the restore prefix above picks
+    # up the most recent one this branch is allowed to see.
+    - name: Save engine-v2 per-repository state
+      if: ${{ always() && steps.artifact_state.outputs.complete == 'true' }}
+      uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ steps.environment_preflight.outputs.v2-store-dir }}
+        key: abloh-v2-store-v1-${{ runner.os }}-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    # Saved on the SAME condition and under the SAME key shape as the v2 store: the two are one
+    # feature and a push that carries one half and not the other is the state this change removes.
+    - name: Save triage verdict cache
+      if: ${{ always() && steps.artifact_state.outputs.complete == 'true' }}
+      uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ steps.environment_preflight.outputs.triage-cache-dir }}
+        key: abloh-triage-cache-v1-${{ runner.os }}-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
