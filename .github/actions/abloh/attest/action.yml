@@ -1,0 +1,104 @@
+name: 'Abloh attestation'
+description: >-
+  File the result an Abloh measuring step left on this run. Runs no code of the repository's,
+  builds nothing and measures nothing: it downloads one artifact and posts it. This is the half
+  of the Abloh Action that holds id-token: write, and it is a separate action so that the half
+  which runs beside somebody else's steps can hold nothing at all.
+inputs:
+  control-plane:
+    description: >-
+      Where this job reports to, as an origin. Leave it unset: the address is Abloh's to know and
+      moves by releasing this Action rather than by asking anybody to edit a file.
+
+      It exists as an INPUT and not as an environment variable on purpose. This job is the only
+      one in a customer's workflow that holds id-token: write, and a workflow-level `env:` block
+      is inherited by every job in the file - so a single line written far from this job could
+      point the identity it mints at another host. An input is written on the job itself, in the
+      diff a maintainer reviews, beside the permission it affects. The boundary refuses ambient
+      overrides outright rather than ignoring them.
+    required: false
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    # WHATEVER THE MEASURING JOB LEFT, AND NOTHING IF IT LEFT NOTHING.
+    #
+    # `pattern:` RATHER THAN `name:`, AND THAT IS THE WHOLE POINT OF THE LINE. With `name:` the
+    # action throws `Artifact '<name>' not found` when the artifact is absent - and it is legitimately
+    # absent whenever the test job failed before Abloh's step ran, which is exactly the case this job
+    # is written to survive (it runs on `!cancelled()`). The pattern path filters a listing instead:
+    # zero matches downloads nothing and succeeds. Verified against the pinned source at v8.0.1,
+    # `src/download-artifact.ts`, where only the `name` and `artifact-ids` branches throw.
+    - name: Take what the measuring job left
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        pattern: abloh-setup-trial
+        merge-multiple: true
+        path: ${{ runner.temp }}/abloh-attestation
+    # THE RUNTIME THIS JOB RUNS ON IS THE RUNNER'S OWN, and it is allowed to be.
+    #
+    # The measuring half provisions its own Node because it inherits whatever the customer's build
+    # prepared, and a repository pinned to Node 16 would otherwise decide what Abloh runs on. Nothing
+    # of the customer's has run in THIS job: `runs-on: ubuntu-latest` and a GitHub-hosted image is
+    # the whole environment, and its Node is current. One less thing installed in the job that holds
+    # the identity is the trade this whole action is about.
+    #
+    # ------------------------------------------------------------------------------------------
+    # THE AMBIENT ENVIRONMENT REACHES THIS JOB, AND THIS JOB IS THE ONE THAT HOLDS THE IDENTITY.
+    #
+    # A workflow-level `env:` block is inherited by every job in the file, this one included, and
+    # the step above has just written attacker-controllable bytes onto this runner - an artifact's
+    # contents are whatever the job that uploaded it put there. Those two facts together are a
+    # complete break of the boundary if `node` is started under an inherited environment:
+    #
+    #   NODE_OPTIONS: --require <the downloaded directory>/anything.js runs that file, in this job,
+    #   with the mint endpoint in its environment. The same is true of `--import` and
+    #   `--experimental-loader`. NODE_EXTRA_CA_CERTS points TLS trust at a certificate from the same
+    #   directory, which is a control plane an attacker can answer for.
+    #
+    #   PATH decides which `node` is `node`. A prefix naming the downloaded directory makes it
+    #   theirs, so the file is not even needed as a library - it is the interpreter.
+    #
+    # BLANKED RATHER THAN REFUSED, for the ones a repository legitimately sets. `NODE_OPTIONS:
+    # --max-old-space-size=4096` at workflow level is ordinary in a large repository, and refusing it
+    # would fail honest builds to close a hole that emptying the variable closes completely. A
+    # step-level `env:` entry outranks the workflow-level one, which is what makes the blanking real.
+    # The control-plane addresses are the opposite case - nothing legitimate sets those on this job -
+    # and the boundary refuses those outright rather than ignoring them.
+    #
+    # NODE IS RESOLVED FROM ABSOLUTE PATHS, never through `command -v`, for the PATH reason above.
+    # `runs-on: ubuntu-latest` is written by Abloh into the job this action runs in, so the image is
+    # known; a runner without Node at either path is a workflow somebody edited, and it refuses.
+    # ------------------------------------------------------------------------------------------
+    - name: File it
+      # THE TRUSTED SHELL, AND IT IS `action.yml`'s VERBATIM. `env -u` runs BEFORE bash, so bash
+      # starts with no startup hook to read and the node it launches has none to preload; the first
+      # line of the body clears imported shell functions, which `env -u` cannot name because their
+      # names are unbounded. Both halves are the ambient-hook boundary's, and this job needs them
+      # MORE than the measuring half does rather than less: it is the one job in a customer's
+      # workflow that holds an identity, and the step above it has just written attacker-controllable
+      # bytes onto this runner. See `ambient-hook-boundary.test.mjs`.
+      shell: env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u PS4 -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE bash --noprofile --norc -eo pipefail {0}
+      env:
+        ABLOH_ATTESTATION_DIR: ${{ runner.temp }}/abloh-attestation
+        ABLOH_CONTROL_PLANE: ${{ inputs.control-plane }}
+        # WHICH SENTENCE A RUN WITHOUT AN IDENTITY PRINTS. A fork run mints nothing whatever this
+        # job declares, so the fork rule has to be tellable apart from a missing permission here as
+        # well - this is the job the permission is actually on.
+        ABLOH_PR_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        NODE_OPTIONS: ''
+        NODE_PATH: ''
+        NODE_EXTRA_CA_CERTS: ''
+        NODE_REPL_EXTERNAL_MODULE: ''
+        LD_PRELOAD: ''
+        LD_LIBRARY_PATH: ''
+        DYLD_INSERT_LIBRARIES: ''
+      run: |
+        while read -r _ _ abloh_fn; do unset -f "$abloh_fn" || :; done < <(declare -F)
+        set -euo pipefail
+        ABLOH_NODE=""
+        for candidate in /usr/local/bin/node /usr/bin/node; do
+          if [ -x "$candidate" ]; then ABLOH_NODE="$candidate"; break; fi
+        done
+        [ -n "$ABLOH_NODE" ] || { echo "the Abloh attestation job found no Node runtime at a known path on this runner; it expects the GitHub-hosted ubuntu image its job declares" >&2; exit 2; }
+        "$ABLOH_NODE" "$GITHUB_ACTION_PATH/../action-boundary.mjs" attest
