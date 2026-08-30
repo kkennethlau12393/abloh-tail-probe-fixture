@@ -1,0 +1,73 @@
+name: probe ceiling-over
+
+# THE DELIVERY CEILING, OVER HALF. One report just over the producer's 256 KiB
+# bound, handed up through GitHub's own artifact service and filed by a real attestation job.
+# The two halves are two scenarios because the product fixes the artifact name and leaves
+# `overwrite` at false on purpose, so two reports in one run is the collision that decision is
+# about. See the note on `ceiling-under` in scenarios.mjs.
+#
+# THE REPORT IS A PADDED DOCUMENT AND NOT A MEASUREMENT. Both ceilings that decide its fate -
+# `SETUP_TRIAL_MAX_BYTES` in `stage-for-attestation` and again in `report-setup-trial` - act on
+# byte length alone, so this reaches the decision under test. Nothing else about this run means
+# anything, and no verdict here may be read as a statement about a real trial.
+on:
+  pull_request:
+    paths:
+      - 'scenarios/ceiling-over/**'
+
+jobs:
+  stage-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+        with:
+          node-version: '22'
+      - name: Write a report over the ceiling
+        env:
+          OUT: ${{ runner.temp }}/abloh-probe/abloh-setup-trial.json
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const path = process.env.OUT;
+            const report = {
+              schema: "abloh/setup-trial/v1",
+              repository: process.env.GITHUB_REPOSITORY,
+              pullRequest: Number(process.env.PR),
+              sha: process.env.GITHUB_SHA,
+              planDigest: "sha256:" + "0".repeat(64),
+              probePadding: "",
+            };
+            const target = 266240;
+            const overhead = Buffer.byteLength(JSON.stringify(report));
+            report.probePadding = "p".repeat(Math.max(0, target - overhead));
+            fs.mkdirSync(require("node:path").dirname(path), { recursive: true });
+            fs.writeFileSync(path, JSON.stringify(report));
+            console.log("probe: wrote " + fs.statSync(path).size + " bytes to " + path);
+          '
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: abloh-setup-trial
+          path: ${{ runner.temp }}/abloh-probe/abloh-setup-trial.json
+          if-no-files-found: error
+          retention-days: 1
+
+  file-report:
+    needs: stage-report
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      # `contents: read` is the probe's, for the checkout that reaches the local Action.
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+      - name: Abloh attestation
+        uses: ./.github/actions/abloh/attest
+        with:
+          control-plane: ${{ vars.ABLOH_PROBE_CONTROL_PLANE }}
